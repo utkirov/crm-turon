@@ -1,33 +1,23 @@
 <script setup lang="ts">
+import { useDebounce } from '@vueuse/core'
 import { useAuthStore } from '~/stores/useAuthStore'
 import { useCrmStore } from '~/stores/useCrmStore'
 import {
   STAGES, STAGE_LABELS, STAGE_SHORT_LABELS, STAGE_ICONS,
   ROLE_LABELS, ROLE_ICONS,
 } from '~/constants/taskCatalog'
+import dayjs from 'dayjs'
+import { fmtDate, fmtDateShort } from '~/utils/date'
+import { fmtMoney } from '~/utils/money'
 import type { ProjectStatus, DesignStage, StageRole, ServiceStatus, DocumentStatus, DocumentTemplate, ProjectType } from '~/types/crm'
 
-definePageMeta({ layout: 'default', middleware: ['auth'] })
+definePageMeta({ layout: 'default', middleware: ['auth', 'role'] })
 
 const auth  = useAuthStore()
 const crm   = useCrmStore()
 const toast = useToast()
 const route = useRoute()
-const today = new Date().toISOString().split('T')[0]
-
-// ── Date formatter ─────────────────────────────────────────────────────────────
-function fmtDate(iso?: string) {
-  if (!iso) return '—'
-  try {
-    return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(iso))
-  } catch { return iso }
-}
-function fmtDateShort(iso?: string) {
-  if (!iso) return '—'
-  try {
-    return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' }).format(new Date(iso))
-  } catch { return iso }
-}
+const today = dayjs().format('YYYY-MM-DD')
 
 // ── Search, filter, sort ───────────────────────────────────────────────────────
 const searchQuery  = ref('')
@@ -65,7 +55,7 @@ const projects = computed(() => {
   })
 })
 
-const fmt = (n: number) => n.toLocaleString('ru-RU')
+const fmt = fmtMoney
 
 const TYPE_LABELS: Record<string, string> = {
   residential: 'Жилой', commercial: 'Коммерческий',
@@ -98,7 +88,7 @@ onMounted(() => {
   if (qId && crm.projects.find(p => p.id === qId)) {
     selected.value = qId
   } else if (!selected.value && projects.value.length) {
-    selected.value = projects.value[0].id
+    selected.value = projects.value[0]?.id ?? ''
   }
 })
 
@@ -108,7 +98,17 @@ const financials      = computed(() => selected.value ? crm.projectFinancials(se
 function selectProject(id: string) {
   selected.value = id
   detailTab.value = 'overview'
+  taskSearchRaw.value = ''
 }
+
+// ── Document progress for header ──────────────────────────────────────────────
+const docProgress = computed(() => {
+  const docs = selectedProject.value?.documents ?? []
+  if (!docs.length) return null
+  const received = docs.filter(d => d.status === 'received').length
+  const total    = docs.filter(d => d.status !== 'na').length
+  return { received, total }
+})
 
 // ── Project status change ─────────────────────────────────────────────────────
 function changeProjectStatus(status: string) {
@@ -157,9 +157,18 @@ function stageStats(stage: DesignStage) {
   return { total: tasks.length, done, pct, status } as const
 }
 
-// Tasks for a role within a stage
+// Tasks for a role within a stage (respects task search)
 function getTasksForStageRole(stage: DesignStage, role: string) {
-  return selectedProject.value?.tasks.filter(t => t.stage === stage && t.role === role) ?? []
+  const q = taskSearch.value.toLowerCase()
+  return (selectedProject.value?.tasks ?? []).filter(t => {
+    if (t.stage !== stage || t.role !== role) return false
+    if (q) {
+      const name = crm.taskMap[t.taskId]?.name?.toLowerCase() ?? ''
+      const staff = crm.staffById(t.staffId ?? '')?.name?.toLowerCase() ?? ''
+      return name.includes(q) || staff.includes(q)
+    }
+    return true
+  })
 }
 
 // Roles present in this project for the given stage
@@ -169,10 +178,14 @@ function getProjectRolesForStage(stage: DesignStage) {
   return Array.from(roles)
 }
 
-// Overdue check
-function isOverdue(deadline?: string) {
+// Overdue check (using imported util)
+function isOverdue(deadline?: string | null) {
   return !!deadline && deadline < today
 }
+
+// ── Task search within Overview tab ───────────────────────────────────────────
+const taskSearchRaw = ref('')
+const taskSearch = useDebounce(taskSearchRaw, 300)
 
 // Status icons
 const TASK_STATUS_ICON: Record<ServiceStatus, string> = {
@@ -447,6 +460,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
 </script>
 
 <template>
+  <div>
   <div class="flex h-[calc(100vh-4rem)] overflow-hidden">
 
     <!-- ════════════════════ LEFT: PROJECT LIST ════════════════════ -->
@@ -583,6 +597,13 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                 <UIcon name="i-ph-calendar-blank" class="w-3.5 h-3.5" />
                 {{ fmtDateShort(selectedProject.startDate) }} → {{ fmtDateShort(selectedProject.plannedEndDate) }}
               </span>
+              <!-- Document progress -->
+              <span v-if="docProgress && docProgress.total > 0" class="flex items-center gap-1" :title="`Документы: ${docProgress.received} из ${docProgress.total} получено`">
+                <UIcon name="i-ph-files" class="w-3.5 h-3.5" :class="docProgress.received === docProgress.total ? 'text-green-500' : 'text-amber-500'" />
+                <span :class="docProgress.received === docProgress.total ? 'text-green-600 dark:text-green-400 font-medium' : ''">
+                  {{ docProgress.received }}/{{ docProgress.total }} доков
+                </span>
+              </span>
             </div>
           </div>
           <!-- Contract amount + edit -->
@@ -677,6 +698,13 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                 :label="`${stageStats(activeOverviewStage).done}/${stageStats(activeOverviewStage).total}`"
                 color="neutral" variant="subtle" size="xs"
               />
+              <UInput
+                v-model="taskSearchRaw"
+                icon="i-ph-magnifying-glass"
+                placeholder="Поиск задач..."
+                size="xs"
+                class="w-40"
+              />
               <div class="flex-1" />
               <!-- Collapse/Expand all + Add task -->
               <UButton size="sm" variant="ghost" color="neutral" icon="i-ph-arrows-out" @click="expandAllRoles">Развернуть</UButton>
@@ -696,7 +724,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
               <UCard
                 v-for="role in getProjectRolesForStage(activeOverviewStage)"
                 :key="`${activeOverviewStage}-${role}`"
-                :ui="{ body: { padding: 'p-0' } }"
+                :ui="{ body: 'p-0' }"
               >
                 <!-- Role header -->
                 <button
@@ -778,14 +806,14 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                       >
                         <UBadge
                           label="На согласовании"
-                          color="orange" variant="subtle" size="xs"
+                          color="warning" variant="subtle" size="xs"
                           class="hover:opacity-80"
                         />
                       </button>
                       <UBadge
                         v-else-if="task.price === 0"
                         label="Цена не установлена"
-                        color="amber" variant="subtle" size="xs"
+                        color="warning" variant="subtle" size="xs"
                       />
                       <span v-else class="text-xs text-slate-500">
                         {{ fmt(task.price) }} сум
@@ -818,10 +846,10 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
               <UBadge
                 v-if="docsForActiveStage.length"
                 :label="`${docsForActiveStage.filter(d => d.status === 'received').length}/${docsForActiveStage.length}`"
-                color="orange" variant="subtle" size="xs"
+                color="warning" variant="subtle" size="xs"
               />
               <div class="flex-1" />
-              <UButton size="sm" variant="soft" color="orange" icon="i-ph-plus" @click="openAddDoc">Добавить</UButton>
+              <UButton size="sm" variant="soft" color="warning" icon="i-ph-plus" @click="openAddDoc">Добавить</UButton>
             </div>
 
             <div v-if="docsForActiveStage.length === 0"
@@ -860,7 +888,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                   variant="subtle" size="xs"
                 />
                 <UButton size="sm" icon="i-ph-pencil" variant="ghost" color="neutral" @click="openDocEdit(doc)" />
-                <UButton size="sm" icon="i-ph-trash" variant="ghost" color="red"
+                <UButton size="sm" icon="i-ph-trash" variant="ghost" color="error"
                   @click="crm.removeDocumentFromProject(selected!, doc.id)" />
               </div>
             </div>
@@ -940,7 +968,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                 <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ fmt(ms.amount) }} сум</span>
                 <UBadge
                   :label="ms.status === 'paid' ? 'Оплачен' : 'Ожидает'"
-                  :color="ms.status === 'paid' ? 'green' : 'neutral'"
+                  :color="ms.status === 'paid' ? 'success' : 'neutral'"
                   variant="subtle" size="xs"
                 />
                 <!-- Mark as paid button -->
@@ -948,7 +976,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
                   v-if="ms.status !== 'paid'"
                   size="sm"
                   icon="i-ph-check"
-                  color="green"
+                  color="success"
                   variant="soft"
                   @click="payMilestone(ms.id)"
                 >
@@ -1185,7 +1213,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
               </span>
               <UBadge
                 :label="appr.status === 'approved' ? 'Одобрено' : appr.status === 'rejected' ? 'Отклонено' : 'Ожидает'"
-                :color="appr.status === 'approved' ? 'green' : appr.status === 'rejected' ? 'red' : 'amber'"
+                :color="appr.status === 'approved' ? 'success' : appr.status === 'rejected' ? 'error' : 'warning'"
                 variant="subtle" size="xs"
               />
             </div>
@@ -1195,7 +1223,7 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
     </template>
     <template #footer>
       <div class="flex gap-2 justify-between">
-        <UButton variant="ghost" color="red" icon="i-ph-x" @click="cancelCr">Отозвать запрос</UButton>
+        <UButton variant="ghost" color="error" icon="i-ph-x" @click="cancelCr">Отозвать запрос</UButton>
         <UButton variant="ghost" color="neutral" @click="showCrDetailModal = false">Закрыть</UButton>
       </div>
     </template>
@@ -1264,4 +1292,5 @@ const STAGE_OPTIONS = STAGES.map(s => ({ label: STAGE_SHORT_LABELS[s], value: s 
       </div>
     </template>
   </UModal>
+  </div>
 </template>

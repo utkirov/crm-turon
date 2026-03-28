@@ -36,18 +36,30 @@
   background: oklch(0.4 0.01 260 / 0.4);
 }
 
-/* ── Smooth page transitions ──────────────────────────────── */
-.page-enter-active,
+/* ── Page transitions ─────────────────────────────────────── */
+.page-enter-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
 .page-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.16s ease, transform 0.16s ease;
 }
 .page-enter-from {
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateX(12px) scale(0.99);
 }
 .page-leave-to {
   opacity: 0;
-  transform: translateY(-4px);
+  transform: translateX(-8px) scale(0.99);
+}
+
+/* ── Layout transitions ───────────────────────────────────── */
+.layout-enter-active,
+.layout-leave-active {
+  transition: opacity 0.25s ease;
+}
+.layout-enter-from,
+.layout-leave-to {
+  opacity: 0;
 }
 
 /* ── Card lift on hover ───────────────────────────────────── */
@@ -55,11 +67,100 @@
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 .card-hover:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 25px -5px oklch(0.3 0.02 260 / 0.08), 0 4px 10px -5px oklch(0.3 0.02 260 / 0.04);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 30px -8px oklch(0.3 0.02 260 / 0.12), 0 4px 10px -5px oklch(0.3 0.02 260 / 0.06);
 }
 .dark .card-hover:hover {
-  box-shadow: 0 8px 25px -5px oklch(0.1 0.02 260 / 0.3), 0 4px 10px -5px oklch(0.1 0.02 260 / 0.15);
+  box-shadow: 0 12px 30px -8px oklch(0.05 0.02 260 / 0.4), 0 4px 10px -5px oklch(0.05 0.02 260 / 0.2);
+}
+
+/* ── Sidebar nav item animations ─────────────────────────── */
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.nav-item {
+  animation: slideInLeft 0.22s ease both;
+}
+.nav-item:nth-child(1)  { animation-delay: 0ms; }
+.nav-item:nth-child(2)  { animation-delay: 35ms; }
+.nav-item:nth-child(3)  { animation-delay: 70ms; }
+.nav-item:nth-child(4)  { animation-delay: 105ms; }
+.nav-item:nth-child(5)  { animation-delay: 140ms; }
+.nav-item:nth-child(6)  { animation-delay: 175ms; }
+.nav-item:nth-child(7)  { animation-delay: 210ms; }
+
+/* ── List stagger transitions (for v-for + TransitionGroup) ─ */
+.list-move,
+.list-enter-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.list-leave-active {
+  transition: opacity 0.15s ease;
+  position: absolute;
+  width: 100%;
+}
+.list-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.list-leave-to {
+  opacity: 0;
+}
+
+/* ── Kanban card enter animation ──────────────────────────── */
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.kanban-card {
+  animation: cardIn 0.2s ease both;
+}
+
+/* ── Button press micro-animation ─────────────────────────── */
+button:active:not(:disabled),
+a[role="button"]:active {
+  transform: scale(0.97);
+  transition: transform 0.08s ease;
+}
+
+/* ── Stat/number card pop-in ──────────────────────────────── */
+@keyframes popIn {
+  0%   { opacity: 0; transform: scale(0.94) translateY(6px); }
+  60%  { transform: scale(1.02) translateY(-1px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.stat-card {
+  animation: popIn 0.28s ease both;
+}
+.stat-card:nth-child(1) { animation-delay: 0ms; }
+.stat-card:nth-child(2) { animation-delay: 50ms; }
+.stat-card:nth-child(3) { animation-delay: 100ms; }
+.stat-card:nth-child(4) { animation-delay: 150ms; }
+.stat-card:nth-child(5) { animation-delay: 200ms; }
+
+/* ── Skeleton shimmer ─────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.skeleton {
+  background: linear-gradient(90deg,
+    oklch(0.92 0 0) 25%,
+    oklch(0.88 0 0) 50%,
+    oklch(0.92 0 0) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 6px;
+}
+.dark .skeleton {
+  background: linear-gradient(90deg,
+    oklch(0.2 0 0) 25%,
+    oklch(0.24 0 0) 50%,
+    oklch(0.2 0 0) 75%
+  );
+  background-size: 200% 100%;
 }
 
 /* ── Gradient text helper ─────────────────────────────────── */

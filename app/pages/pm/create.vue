@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { z } from 'zod'
+import { useSessionStorage } from '@vueuse/core'
 import { useAuthStore } from '~/stores/useAuthStore'
 import { useCrmStore } from '~/stores/useCrmStore'
 import {
   STAGES, STAGE_LABELS, STAGE_SHORT_LABELS,
   STAGE_ICONS, ROLE_LABELS, ROLE_ICONS,
 } from '~/constants/taskCatalog'
+import { fmtMoney, parseMoney } from '~/utils/money'
 import type { DesignStage, StageRole, ProjectType, CatalogTask } from '~/types/crm'
 
-definePageMeta({ layout: 'default', middleware: ['auth'] })
+definePageMeta({ layout: 'default', middleware: ['auth', 'role'] })
 
 const auth = useAuthStore()
 const crm  = useCrmStore()
@@ -18,10 +20,24 @@ const toast = useToast()
 // ─── Step management ──────────────────────────────────────────────────────────
 const step = ref(1)
 const STEPS = [
-  { n: 1, label: 'Данные',   icon: 'i-ph-file-text' },
-  { n: 2, label: 'Задачи',   icon: 'i-ph-stack' },
-  { n: 3, label: 'Команда',  icon: 'i-ph-users' },
+  { n: 1, label: 'Данные',      icon: 'i-ph-file-text' },
+  { n: 2, label: 'Задачи',      icon: 'i-ph-stack' },
+  { n: 3, label: 'Команда',     icon: 'i-ph-users' },
+  { n: 4, label: 'Просмотр',    icon: 'i-ph-eye' },
 ]
+
+// ─── Draft auto-save via sessionStorage ───────────────────────────────────────
+const draftInfo = useSessionStorage('create-project-draft', {
+  name: '', client: '', location: '',
+  type: 'residential' as ProjectType,
+  contractAmountStr: '',
+  startDate: '', plannedEndDate: '',
+  contactPerson: '', contactPhone: '', contactEmail: '',
+})
+
+function clearDraft() {
+  draftInfo.value = { name: '', client: '', location: '', type: 'residential', contractAmountStr: '', startDate: '', plannedEndDate: '', contactPerson: '', contactPhone: '', contactEmail: '' }
+}
 
 // ─── Step 1: Project info ─────────────────────────────────────────────────────
 const step1Schema = z.object({
@@ -33,22 +49,22 @@ const step1Schema = z.object({
 })
 
 const info = reactive({
-  name: '', client: '', location: '',
-  type: 'residential' as ProjectType,
-  contractAmount: 0,
-  startDate: '', plannedEndDate: '',
-  contactPerson: '', contactPhone: '', contactEmail: '',
+  name:            draftInfo.value.name,
+  client:          draftInfo.value.client,
+  location:        draftInfo.value.location,
+  type:            draftInfo.value.type,
+  contractAmountStr: draftInfo.value.contractAmountStr,
+  startDate:       draftInfo.value.startDate,
+  plannedEndDate:  draftInfo.value.plannedEndDate,
+  contactPerson:   draftInfo.value.contactPerson,
+  contactPhone:    draftInfo.value.contactPhone,
+  contactEmail:    draftInfo.value.contactEmail,
 })
 
-// Real-time formatted display of contract amount
-const contractAmountDisplay = computed(() =>
-  info.contractAmount ? info.contractAmount.toLocaleString('ru-RU') : ''
-)
+// Sync changes back to sessionStorage draft
+watch(info, () => { Object.assign(draftInfo.value, info) })
 
-function onContractAmountInput(val: string | number) {
-  const num = Number(String(val).replace(/\D/g, '')) || 0
-  info.contractAmount = num
-}
+const contractAmount = computed(() => parseMoney(info.contractAmountStr))
 const step1Errors = ref<Record<string, string>>({})
 const contactExpanded = ref(false)
 
@@ -68,7 +84,7 @@ function removeMilestone(i: number) {
 const milestonePctTotal = computed(() => milestones.value.reduce((s, m) => s + (m.percent || 0), 0))
 
 function validateStep1() {
-  const r = step1Schema.safeParse({ ...info })
+  const r = step1Schema.safeParse({ ...info, contractAmount: contractAmount.value })
   step1Errors.value = {}
   if (!r.success) {
     r.error.issues.forEach(i => { step1Errors.value[i.path[0] as string] = i.message })
@@ -234,6 +250,9 @@ function nextStep() {
   step.value++
 }
 function prevStep() { step.value-- }
+function goToStep(n: number) {
+  if (n < step.value) step.value = n
+}
 
 // ─── Submit ───────────────────────────────────────────────────────────────────
 const submitting = ref(false)
@@ -251,13 +270,13 @@ async function submit() {
       .filter(d => selectedDocs[d.id])
       .map(d => ({ templateId: d.id, name: d.name, stage: d.stage }))
 
-    crm.createProject({
+    await crm.createProject({
       name: info.name,
       client: info.client,
       location: info.location,
       type: info.type,
       pmId: auth.currentUser?.id ?? 'dilshod',
-      contractAmount: info.contractAmount,
+      contractAmount: contractAmount.value,
       startDate: info.startDate || undefined,
       plannedEndDate: info.plannedEndDate || undefined,
       contactPerson: info.contactPerson || undefined,
@@ -272,6 +291,8 @@ async function submit() {
       documents: selectedDocTemplates,
     })
 
+    clearDraft()
+    toast.add({ title: 'Проект создан!', color: 'success', icon: 'i-ph-check-circle' })
     await router.push('/pm/projects')
   } finally {
     submitting.value = false
@@ -279,7 +300,7 @@ async function submit() {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const fmt = (n: number) => n.toLocaleString('ru-RU')
+const fmt = fmtMoney
 
 const STAGE_STATUS_COLOR: Record<string, string> = {
   completed: 'text-green-600',
@@ -289,12 +310,16 @@ const STAGE_STATUS_COLOR: Record<string, string> = {
 
 const selectedTasksList = computed(() =>
   Object.keys(selectedTasks)
-    .map(id => ({ ...crm.taskMap[id], deadline: selectedTasks[id]?.deadline, staffId: assignments[id] }))
-    .filter(Boolean)
+    .map(id => {
+      const task = crm.taskMap[id]
+      if (!task) return null
+      return { ...task, deadline: selectedTasks[id]?.deadline, staffId: assignments[id] }
+    })
+    .filter((t): t is NonNullable<typeof t> => t !== null)
 )
 
 const stagesInSelection = computed(() =>
-  [...new Set(selectedTasksList.value.map(t => t?.stage))].filter(Boolean)
+  [...new Set(selectedTasksList.value.map(t => t.stage))].filter((s): s is NonNullable<typeof s> => !!s)
 )
 </script>
 
@@ -370,13 +395,7 @@ const stagesInSelection = computed(() =>
 
             <!-- Contract amount -->
             <UFormField label="Сумма контракта (сум)" required :error="step1Errors.contractAmount">
-              <UInput
-                :model-value="contractAmountDisplay"
-                @update:model-value="onContractAmountInput($event)"
-                placeholder="450 000 000"
-                class="w-full"
-                inputmode="numeric"
-              />
+              <MoneyInput v-model="info.contractAmountStr" class="w-full" />
             </UFormField>
 
             <!-- Dates -->
@@ -427,7 +446,7 @@ const stagesInSelection = computed(() =>
               <UInput type="date" v-model="ms.dueDate" class="w-36 shrink-0" size="sm" />
               <UButton
                 v-if="milestones.length > 1"
-                icon="i-ph-x" size="xs" variant="ghost" color="red"
+                icon="i-ph-x" size="xs" variant="ghost" color="error"
                 @click="removeMilestone(i)"
               />
             </div>
@@ -571,7 +590,7 @@ const stagesInSelection = computed(() =>
                   <UIcon name="i-ph-calendar" class="w-3.5 h-3.5 text-slate-400" />
                   <UInput
                     type="date"
-                    v-model="selectedTasks[task.id].deadline"
+                    v-model="selectedTasks[task.id]!.deadline"
                     size="xs"
                     class="w-36"
                   />
@@ -592,7 +611,7 @@ const stagesInSelection = computed(() =>
               <span class="flex-1 text-left">Исходные документы — {{ STAGE_SHORT_LABELS[activeStage] }}</span>
               <UBadge
                 v-if="docsForActiveStage.filter(d => selectedDocs[d.id]).length > 0"
-                color="orange" variant="subtle" size="xs"
+                color="warning" variant="subtle" size="xs"
               >
                 {{ docsForActiveStage.filter(d => selectedDocs[d.id]).length }} выбрано
               </UBadge>
@@ -628,7 +647,7 @@ const stagesInSelection = computed(() =>
                 />
                 <UIcon name="i-ph-file-text" class="w-4 h-4 text-slate-400 shrink-0" />
                 <span class="flex-1 text-sm text-slate-700 dark:text-slate-300">{{ doc.name }}</span>
-                <UBadge color="orange" variant="soft" size="xs" v-if="selectedDocs[doc.id]">Ожидается</UBadge>
+                <UBadge color="warning" variant="soft" size="xs" v-if="selectedDocs[doc.id]">Ожидается</UBadge>
               </div>
             </div>
           </UCard>
@@ -662,7 +681,7 @@ const stagesInSelection = computed(() =>
 
         <!-- Group tasks by stage -->
         <div v-for="stage in STAGES" :key="stage" class="mb-4">
-          <template v-if="selectedTasksList.filter(t => t?.stage === stage).length > 0">
+          <template v-if="selectedTasksList.filter(t => t.stage === stage).length > 0">
             <div class="flex items-center gap-2 mb-2">
               <UIcon :name="STAGE_ICONS[stage]" class="w-4 h-4 text-slate-400" />
               <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">
@@ -672,19 +691,19 @@ const stagesInSelection = computed(() =>
 
             <div class="space-y-2">
               <div
-                v-for="t in selectedTasksList.filter(tt => tt?.stage === stage)"
-                :key="t?.id"
+                v-for="t in selectedTasksList.filter(tt => tt.stage === stage)"
+                :key="t.id"
                 class="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-800"
               >
                 <!-- Role badge -->
                 <div class="flex items-center gap-1.5 w-36 shrink-0">
-                  <UIcon :name="ROLE_ICONS[t!.role]" class="w-3.5 h-3.5 text-slate-400" />
-                  <span class="text-xs text-slate-500">{{ ROLE_LABELS[t!.role] }}</span>
+                  <UIcon :name="ROLE_ICONS[t.role]" class="w-3.5 h-3.5 text-slate-400" />
+                  <span class="text-xs text-slate-500">{{ ROLE_LABELS[t.role] }}</span>
                 </div>
 
                 <!-- Task name -->
                 <span class="flex-1 text-sm font-medium text-slate-800 dark:text-slate-200">
-                  {{ t?.name }}
+                  {{ t.name }}
                 </span>
 
                 <!-- Deadline (read-only) -->
@@ -695,9 +714,9 @@ const stagesInSelection = computed(() =>
 
                 <!-- Staff selector (filtered by task role) -->
                 <USelect
-                  :model-value="assignments[t!.id]"
-                  @update:model-value="assignments[t!.id] = $event as string | null"
-                  :items="staffOptionsForTask(t!.taskId)"
+                  :model-value="assignments[t.id]"
+                  @update:model-value="assignments[t.id] = $event as string | null"
+                  :items="staffOptionsForTask(t.id)"
                   size="sm"
                   class="w-52 shrink-0"
                   placeholder="Не назначен"
@@ -716,7 +735,7 @@ const stagesInSelection = computed(() =>
             </div>
             <div>
               <span class="text-slate-500">Контракт:</span>
-              <span class="ml-1 font-medium text-slate-800 dark:text-slate-200">{{ fmt(info.contractAmount) }} сум</span>
+              <span class="ml-1 font-medium text-slate-800 dark:text-slate-200">{{ fmt(contractAmount) }} сум</span>
             </div>
             <div>
               <span class="text-slate-500">Задач:</span>
@@ -733,8 +752,138 @@ const stagesInSelection = computed(() =>
 
         <div class="flex justify-between mt-6">
           <UButton variant="ghost" icon="i-ph-arrow-left" @click="prevStep">Назад</UButton>
+          <UButton icon="i-ph-arrow-right" trailing @click="nextStep">Далее</UButton>
+        </div>
+      </div>
+
+      <!-- ════════════════════════════════════════════════════════════
+           STEP 4 — REVIEW & CONFIRM
+      ════════════════════════════════════════════════════════════ -->
+      <div v-if="step === 4" class="space-y-4">
+
+        <!-- Project info -->
+        <UCard :ui="{ body: 'p-4' }">
+          <div class="flex items-center gap-2 mb-3">
+            <UIcon name="i-ph-buildings" class="w-4 h-4 text-blue-500" />
+            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">Информация о проекте</span>
+          </div>
+          <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <div class="flex justify-between">
+              <span class="text-slate-500">Название:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.name }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-500">Клиент:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.client }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-500">Тип:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.type }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-500">Сумма контракта:</span>
+              <span class="font-medium text-emerald-600">{{ fmt(contractAmount) }} сум</span>
+            </div>
+            <div v-if="info.location" class="flex justify-between">
+              <span class="text-slate-500">Местоположение:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.location }}</span>
+            </div>
+            <div v-if="info.startDate" class="flex justify-between">
+              <span class="text-slate-500">Начало:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.startDate }}</span>
+            </div>
+            <div v-if="info.plannedEndDate" class="flex justify-between">
+              <span class="text-slate-500">Завершение:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.plannedEndDate }}</span>
+            </div>
+            <div v-if="info.contactPerson" class="flex justify-between">
+              <span class="text-slate-500">Контакт:</span>
+              <span class="font-medium text-slate-800 dark:text-slate-200">{{ info.contactPerson }}</span>
+            </div>
+          </div>
+          <div class="mt-2 flex justify-end">
+            <UButton size="xs" variant="ghost" icon="i-ph-pencil" @click="goToStep(1)">Редактировать</UButton>
+          </div>
+        </UCard>
+
+        <!-- Milestones -->
+        <UCard :ui="{ body: 'p-4' }">
+          <div class="flex items-center gap-2 mb-3">
+            <UIcon name="i-ph-flag-checkered" class="w-4 h-4 text-violet-500" />
+            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">
+              Этапы оплаты ({{ milestones.length }})
+            </span>
+            <UBadge
+              :color="milestonePctTotal === 100 ? 'success' : 'warning'"
+              variant="subtle" size="xs"
+            >{{ milestonePctTotal }}%</UBadge>
+          </div>
+          <div class="space-y-1.5">
+            <div v-for="(ms, i) in milestones" :key="i" class="flex items-center gap-2 text-sm">
+              <span class="w-5 h-5 rounded-full bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-400 flex items-center justify-center text-xs font-bold shrink-0">{{ i + 1 }}</span>
+              <span class="flex-1 text-slate-700 dark:text-slate-300">{{ ms.label || `Транш ${i + 1}` }}</span>
+              <span class="text-slate-500 text-xs">{{ ms.dueDate || '—' }}</span>
+              <UBadge color="primary" variant="soft" size="xs">{{ ms.percent }}%</UBadge>
+            </div>
+          </div>
+          <div class="mt-2 flex justify-end">
+            <UButton size="xs" variant="ghost" icon="i-ph-pencil" @click="goToStep(1)">Редактировать</UButton>
+          </div>
+        </UCard>
+
+        <!-- Tasks & docs -->
+        <UCard :ui="{ body: 'p-4' }">
+          <div class="flex items-center gap-2 mb-3">
+            <UIcon name="i-ph-list-checks" class="w-4 h-4 text-blue-500" />
+            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">
+              Задачи ({{ Object.keys(selectedTasks).length }}) · Документы ({{ Object.keys(selectedDocs).length }})
+            </span>
+          </div>
+          <div v-for="stage in stagesInSelection" :key="stage" class="mb-2">
+            <div class="flex items-center gap-1.5 mb-1">
+              <UIcon :name="STAGE_ICONS[stage]" class="w-3.5 h-3.5 text-slate-400" />
+              <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ STAGE_SHORT_LABELS[stage] }}</span>
+              <UBadge color="neutral" variant="soft" size="xs">
+                {{ selectedTasksList.filter(t => t.stage === stage).length }}
+              </UBadge>
+            </div>
+          </div>
+          <div class="mt-2 flex justify-end">
+            <UButton size="xs" variant="ghost" icon="i-ph-pencil" @click="goToStep(2)">Редактировать</UButton>
+          </div>
+        </UCard>
+
+        <!-- Staff assignments -->
+        <UCard :ui="{ body: 'p-4' }">
+          <div class="flex items-center gap-2 mb-3">
+            <UIcon name="i-ph-users" class="w-4 h-4 text-amber-500" />
+            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">Назначения</span>
+            <UBadge color="warning" variant="subtle" size="xs">
+              {{ Object.values(assignments).filter(Boolean).length }} / {{ Object.keys(assignments).length }}
+            </UBadge>
+          </div>
+          <div class="space-y-1">
+            <div
+              v-for="t in selectedTasksList" :key="t.id"
+              class="flex items-center gap-2 text-sm"
+            >
+              <span class="flex-1 text-slate-700 dark:text-slate-300 truncate">{{ t.name }}</span>
+              <span v-if="assignments[t.id]" class="text-xs text-green-600 font-medium">
+                {{ crm.staff.find(s => s.id === assignments[t.id])?.name ?? assignments[t.id] }}
+              </span>
+              <span v-else class="text-xs text-slate-400 italic">не назначен</span>
+            </div>
+          </div>
+          <div class="mt-2 flex justify-end">
+            <UButton size="xs" variant="ghost" icon="i-ph-pencil" @click="goToStep(3)">Редактировать</UButton>
+          </div>
+        </UCard>
+
+        <!-- Action row -->
+        <div class="flex justify-between mt-2">
+          <UButton variant="ghost" icon="i-ph-arrow-left" @click="prevStep">Назад</UButton>
           <UButton
-            icon="i-ph-check" color="green"
+            icon="i-ph-check" color="success"
             :loading="submitting"
             @click="submit"
           >

@@ -111,6 +111,7 @@ const addTxValid = computed(() =>
 </script>
 
 <template>
+  <div>
   <div class="flex flex-col h-full overflow-hidden">
     <header class="h-16 flex items-center justify-between px-6 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex-shrink-0">
       <div>
@@ -354,4 +355,5 @@ const addTxValid = computed(() =>
       </div>
     </template>
   </UModal>
+  </div>
 </template>

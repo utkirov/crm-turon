@@ -1,14 +1,17 @@
 <script setup lang="ts">
+import { useDebounce } from '@vueuse/core'
 import { useAuthStore } from '~/stores/useAuthStore'
 import { useCrmStore } from '~/stores/useCrmStore'
 import { STAGE_SHORT_LABELS, STAGE_ICONS, ROLE_LABELS } from '~/constants/taskCatalog'
+import { fmtMoney, parseMoney } from '~/utils/money'
 
-definePageMeta({ layout: 'default', middleware: ['auth'] })
+definePageMeta({ layout: 'default', middleware: ['auth', 'role'] })
 
-const auth = useAuthStore()
-const crm  = useCrmStore()
+const auth  = useAuthStore()
+const crm   = useCrmStore()
+const toast = useToast()
 
-const fmt = (n: number) => n.toLocaleString('ru-RU')
+const fmt = fmtMoney
 
 // ── Unpriced tasks (filtered by selected project if set) ──────────────────────
 const allUnpriced = computed(() => crm.unpricedTasks)
@@ -77,8 +80,24 @@ function defaultSplits(count: number): Array<{ label: string; percent: string }>
   ]
 }
 
+// Preserve existing labels when split count changes — only add/remove entries
 function onSplitCountChange(row: PricingRow) {
-  row.splits = defaultSplits(row.splitCount)
+  const newCount = row.splitCount
+  const defaults = defaultSplits(newCount)
+  const current  = row.splits
+  if (newCount > current.length) {
+    // Append missing entries with default labels
+    for (let i = current.length; i < newCount; i++) {
+      current.push({ label: defaults[i]?.label ?? `Этап ${i + 1}`, percent: defaults[i]?.percent ?? '0' })
+    }
+  } else {
+    // Remove extras, preserve the rest
+    current.splice(newCount)
+  }
+  // Redistribute percentages evenly while keeping labels
+  const even = Math.floor(100 / newCount)
+  const remainder = 100 - even * newCount
+  current.forEach((sp, i) => { sp.percent = String(even + (i === newCount - 1 ? remainder : 0)) })
 }
 
 function splitPctTotal(row: PricingRow) {
@@ -86,13 +105,13 @@ function splitPctTotal(row: PricingRow) {
 }
 
 function pricePreview(row: PricingRow, pct: string) {
-  const price = Number(row.price.replace(/[\s,]/g, ''))
+  const price = parseMoney(row.price)
   if (!price) return '—'
   return fmt(Math.round(price * Number(pct) / 100))
 }
 
 function saveTaskPrice(row: PricingRow) {
-  const price = Number(row.price.replace(/[\s,]/g, ''))
+  const price = parseMoney(row.price)
   if (!price || splitPctTotal(row) !== 100) return
   crm.setTaskPrice(
     row.projectId,
@@ -100,6 +119,53 @@ function saveTaskPrice(row: PricingRow) {
     price,
     row.splits.map(sp => ({ label: sp.label, percent: Number(sp.percent) })),
   )
+  toast.add({ title: 'Цена сохранена', color: 'success' })
+}
+
+// ── Autosave ───────────────────────────────────────────────────────────────────
+const autosaveEnabled = ref(true)
+
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+watch(
+  () => JSON.stringify(pricingRows),
+  () => {
+    if (!autosaveEnabled.value) return
+    if (autosaveTimer) clearTimeout(autosaveTimer)
+    autosaveTimer = setTimeout(() => {
+      for (const row of Object.values(pricingRows)) {
+        const price = parseMoney(row.price)
+        if (price && splitPctTotal(row) === 100) saveTaskPrice(row)
+      }
+    }, 1500)
+  },
+)
+
+// ── Batch mode ─────────────────────────────────────────────────────────────────
+const batchMode  = ref(false)
+const batchPrice = ref('')
+const batchSplitCount = ref(3)
+const batchSelected  = reactive<Set<string>>(new Set())
+
+function toggleBatchSelect(taskId: string) {
+  if (batchSelected.has(taskId)) batchSelected.delete(taskId)
+  else batchSelected.add(taskId)
+}
+
+function applyBatch() {
+  const price = parseMoney(batchPrice.value)
+  if (!price || batchSelected.size === 0) return
+  for (const taskId of batchSelected) {
+    const row = pricingRows[taskId]
+    if (!row) continue
+    row.price = batchPrice.value
+    row.splitCount = batchSplitCount.value
+    onSplitCountChange(row)
+    saveTaskPrice(row)
+  }
+  batchSelected.clear()
+  batchPrice.value = ''
+  batchMode.value = false
+  toast.add({ title: `Цена применена к ${batchSelected.size || '—'} задачам`, color: 'success' })
 }
 
 const rows = computed(() => Object.values(pricingRows))
@@ -119,11 +185,25 @@ const rows = computed(() => Object.values(pricingRows))
         </div>
       </div>
       <div class="flex items-center gap-2">
-        <span v-if="crm.selectedProjectId" class="text-xs text-slate-500 px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg">
-          <UIcon name="i-ph-buildings" class="w-3.5 h-3.5 inline mr-1 text-slate-400" />
-          {{ crm.projects.find(p => p.id === crm.selectedProjectId)?.name }}
-        </span>
-        <UBadge color="green" variant="soft" icon="i-ph-wallet">Финансист</UBadge>
+        <UButton
+          size="sm"
+          :variant="autosaveEnabled ? 'soft' : 'ghost'"
+          :color="autosaveEnabled ? 'success' : 'neutral'"
+          :icon="autosaveEnabled ? 'i-ph-floppy-disk' : 'i-ph-floppy-disk'"
+          @click="autosaveEnabled = !autosaveEnabled"
+        >
+          {{ autosaveEnabled ? 'Автосохр.' : 'Ручной' }}
+        </UButton>
+        <UButton
+          size="sm"
+          :variant="batchMode ? 'solid' : 'ghost'"
+          :color="batchMode ? 'primary' : 'neutral'"
+          icon="i-ph-stack"
+          @click="batchMode = !batchMode"
+        >
+          Пакетный
+        </UButton>
+        <UBadge color="success" variant="soft" icon="i-ph-wallet">Финансист</UBadge>
       </div>
     </header>
 
@@ -147,7 +227,7 @@ const rows = computed(() => Object.values(pricingRows))
               PM назначил задачи сотрудникам. Установите стоимость и траншевую разбивку для каждой задачи.
             </p>
           </div>
-          <UBadge color="amber" variant="solid" size="lg">{{ rows.length }}</UBadge>
+          <UBadge color="warning" variant="solid" size="lg">{{ rows.length }}</UBadge>
         </div>
 
         <!-- Empty state -->
@@ -159,13 +239,45 @@ const rows = computed(() => Object.values(pricingRows))
           <p class="text-sm text-slate-400">Нет задач, ожидающих установки цены</p>
         </div>
 
+        <!-- Batch toolbar -->
+        <div v-if="batchMode && rows.length > 0" class="flex items-center gap-3 p-4 rounded-2xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60">
+          <UIcon name="i-ph-stack" class="w-5 h-5 text-blue-500 shrink-0" />
+          <p class="text-sm font-medium text-blue-700 dark:text-blue-300">
+            Выбрано: {{ batchSelected.size }} задач
+          </p>
+          <MoneyInput v-model="batchPrice" placeholder="Единая цена" class="w-44" />
+          <USelect
+            v-model="batchSplitCount"
+            :items="[{ label: '2 транша', value: 2 }, { label: '3 транша', value: 3 }, { label: '4 транша', value: 4 }]"
+            class="w-32"
+          />
+          <UButton
+            color="primary" size="sm" icon="i-ph-paper-plane-right"
+            :disabled="!batchPrice || batchSelected.size === 0"
+            @click="applyBatch"
+          >
+            Применить
+          </UButton>
+          <UButton color="neutral" variant="ghost" size="sm" @click="batchSelected.clear()">Сбросить</UButton>
+        </div>
+
         <!-- Pricing cards -->
         <div
           v-for="row in rows" :key="row.taskId"
           class="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl p-5 shadow-sm"
+          :class="batchMode && batchSelected.has(row.taskId) ? 'ring-2 ring-blue-400 ring-offset-1' : ''"
         >
           <!-- Task info -->
           <div class="flex items-start justify-between gap-3 mb-4">
+            <!-- Batch checkbox -->
+            <div v-if="batchMode" class="shrink-0 pt-0.5">
+              <input
+                type="checkbox"
+                class="w-4 h-4 rounded text-blue-500 cursor-pointer"
+                :checked="batchSelected.has(row.taskId)"
+                @change="toggleBatchSelect(row.taskId)"
+              />
+            </div>
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 mb-1.5 flex-wrap">
                 <div class="flex items-center gap-1 text-xs text-slate-400">
@@ -191,12 +303,7 @@ const rows = computed(() => Object.values(pricingRows))
           <!-- Price + split count -->
           <div class="flex items-end gap-3 mb-4">
             <UFormField label="Цена (сум)" class="flex-1">
-              <UInput
-                v-model="row.price"
-                placeholder="5 000 000"
-                inputmode="numeric"
-                class="w-full"
-              />
+              <MoneyInput v-model="row.price" class="w-full" />
             </UFormField>
             <UFormField label="Траншей">
               <USelect
@@ -249,11 +356,11 @@ const rows = computed(() => Object.values(pricingRows))
                 <span v-else> ✓</span>
               </div>
               <span v-if="row.price && splitPctTotal(row) === 100" class="text-xs text-slate-400">
-                Итого: {{ fmt(Number(row.price.replace(/[\s,]/g, ''))) }} сум
+                Итого: {{ fmt(parseMoney(row.price)) }} сум
               </span>
             </div>
             <UButton
-              color="green"
+              color="success"
               icon="i-ph-floppy-disk"
               :disabled="!row.price || splitPctTotal(row) !== 100"
               @click="saveTaskPrice(row)"

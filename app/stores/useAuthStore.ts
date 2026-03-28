@@ -21,7 +21,12 @@ export const useAuthStore = defineStore('auth', {
     currentUserId: null as string | null
   }),
 
-  persist: true,
+  persist: {
+    storage: persistedState.cookiesWithOptions({
+      sameSite: 'strict',
+      maxAge: 60 * 60 * 24 * 30,
+    }),
+  },
 
   getters: {
     currentUser: (state): StaffMember | null =>
@@ -41,10 +46,12 @@ export const useAuthStore = defineStore('auth', {
   },
 
   actions: {
-    login(staffId: string) {
+    async login(staffId: string) {
+      await $fetch('/api/auth/login', { method: 'POST', body: { staffId } })
       this.currentUserId = staffId
     },
-    logout() {
+    async logout() {
+      await $fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
       this.currentUserId = null
     }
   }

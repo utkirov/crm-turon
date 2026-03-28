@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import dayjs from 'dayjs'
 import { TASK_CATALOG as INITIAL_TASK_CATALOG, TASK_MAP as STATIC_TASK_MAP } from '~/constants/taskCatalog'
 import { MOCK_STAFF } from '~/stores/useAuthStore'
 import type {
@@ -148,13 +149,15 @@ const MOCK_TRANSACTIONS: Transaction[] = [
 
 export const useCrmStore = defineStore('crm', {
   state: () => ({
-    projects:          [...MOCK_PROJECTS] as CrmProject[],
-    staff:             [...MOCK_STAFF]   as StaffMember[],
-    transactions:      [...MOCK_TRANSACTIONS] as Transaction[],
+    projects:          [] as CrmProject[],
+    staff:             [] as StaffMember[],
+    transactions:      [] as Transaction[],
     taskCatalog:       [...INITIAL_TASK_CATALOG] as CatalogTask[],
     documentTemplates: [...MOCK_DOC_TEMPLATES]   as DocumentTemplate[],
     changeRequests:    [] as ChangeRequest[],
     selectedProjectId: null as string | null,
+    _loading:          false,
+    _error:            null as string | null,
   }),
 
   getters: {
@@ -285,6 +288,28 @@ export const useCrmStore = defineStore('crm', {
   },
 
   actions: {
+    // ── Fetch all data from server ────────────────────────────────────────────
+    async fetchAll() {
+      this._loading = true
+      this._error   = null
+      try {
+        const [projectsData, transactionsData, staffData] = await Promise.all([
+          $fetch<CrmProject[]>('/api/projects'),
+          $fetch<Transaction[]>('/api/transactions'),
+          $fetch<StaffMember[]>('/api/staff'),
+        ])
+        this.projects     = projectsData
+        this.transactions = transactionsData
+        this.staff        = staffData
+      }
+      catch (e: any) {
+        this._error = e?.data?.message ?? e?.message ?? 'Ошибка загрузки данных'
+      }
+      finally {
+        this._loading = false
+      }
+    },
+
     // ── Catalog management ────────────────────────────────────────────────────
     addCatalogTask(task: Omit<CatalogTask, 'id'>) {
       const id = `task-custom-${Date.now()}`
@@ -354,6 +379,9 @@ export const useCrmStore = defineStore('crm', {
       doc.status = status
       doc.receivedDate  = receivedDate
       doc.pendingReason = pendingReason
+      $fetch(`/api/documents/${docId}`, { method: 'PATCH', body: { status, receivedDate: receivedDate ?? null, pendingReason: pendingReason ?? null } }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось обновить документ', description: e?.message })
+      })
     },
     addDocumentTemplate(template: Omit<DocumentTemplate, 'id'>) {
       const id = `doc-tmpl-${Date.now()}`
@@ -366,7 +394,7 @@ export const useCrmStore = defineStore('crm', {
     },
 
     // ── Create project ────────────────────────────────────────────────────────
-    createProject(data: {
+    async createProject(data: {
       name: string; client: string; location: string; type: CrmProject['type']
       pmId: string; contractAmount: number
       startDate?: string; plannedEndDate?: string
@@ -382,7 +410,7 @@ export const useCrmStore = defineStore('crm', {
       const project: CrmProject = {
         id, name: data.name, client: data.client, location: data.location,
         type: data.type, pmId: data.pmId, contractAmount: data.contractAmount,
-        status: 'active', createdAt: new Date().toISOString().split('T')[0],
+        status: 'active', createdAt: dayjs().format('YYYY-MM-DD'),
         startDate: data.startDate, plannedEndDate: data.plannedEndDate,
         contactPerson: data.contactPerson, contactPhone: data.contactPhone,
         contactEmail: data.contactEmail,
@@ -408,6 +436,18 @@ export const useCrmStore = defineStore('crm', {
       }
 
       this.projects.push(project)
+
+      // Persist to server
+      await $fetch('/api/projects', { method: 'POST', body: {
+        id, name: data.name, client: data.client, location: data.location,
+        type: data.type, pmId: data.pmId, contractAmount: data.contractAmount,
+        status: 'active', startDate: data.startDate, plannedEndDate: data.plannedEndDate,
+        contactPerson: data.contactPerson, contactPhone: data.contactPhone,
+        contactEmail: data.contactEmail, createdAt: project.createdAt,
+      }}).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Проект не сохранён на сервере', description: e?.message })
+      })
+
       return id
     },
 
@@ -432,15 +472,24 @@ export const useCrmStore = defineStore('crm', {
       if (!task) return
       const split = task.paymentSplits.find(sp => sp.id === splitId)
       if (!split || split.status === 'paid') return
-      const paidAt = new Date().toISOString().split('T')[0]
+      const paidAt = dayjs().format('YYYY-MM-DD')
       split.status = 'paid'
       split.paidAt = paidAt
       const taskMap = Object.fromEntries(this.taskCatalog.map(t => [t.id, t]))
-      this.transactions.push({
+      const newTx: Transaction = {
         id: `tx-${Date.now()}`, projectId, type: 'outflow', amount: split.amount,
         description: `${split.label} — ${taskMap[task.taskId]?.name ?? task.taskId}`,
         date: paidAt, category: 'staff_payment',
         staffId: task.staffId ?? undefined, taskId,
+      }
+      this.transactions.push(newTx)
+
+      // Sync to server
+      $fetch(`/api/splits/${splitId}`, { method: 'PATCH', body: { status: 'paid', paidAt } }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось обновить выплату', description: e?.message })
+      })
+      $fetch('/api/transactions', { method: 'POST', body: newTx }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось записать транзакцию', description: e?.message })
       })
     },
 
@@ -450,13 +499,22 @@ export const useCrmStore = defineStore('crm', {
       if (!project) return
       const ms = project.clientMilestones.find(m => m.id === milestoneId)
       if (!ms || ms.status === 'paid') return
-      const msPaidAt = new Date().toISOString().split('T')[0]
+      const msPaidAt = dayjs().format('YYYY-MM-DD')
       ms.status = 'paid'
       ms.paidAt = msPaidAt
-      this.transactions.push({
+      const msTx: Transaction = {
         id: `tx-${Date.now()}`, projectId, type: 'inflow', amount: ms.amount,
         description: `${ms.label} — ${project.name}`,
         date: msPaidAt, category: 'client_payment', milestoneId,
+      }
+      this.transactions.push(msTx)
+
+      // Sync to server
+      $fetch(`/api/milestones/${milestoneId}`, { method: 'PATCH', body: { status: 'paid', paidAt: msPaidAt } }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось обновить транш', description: e?.message })
+      })
+      $fetch('/api/transactions', { method: 'POST', body: msTx }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось записать транзакцию', description: e?.message })
       })
     },
 
@@ -465,7 +523,12 @@ export const useCrmStore = defineStore('crm', {
       const project = this.projects.find(p => p.id === projectId)
       if (!project) return
       const task = project.tasks.find(t => t.id === taskId)
-      if (task) task.status = status
+      if (task) {
+        task.status = status
+        $fetch(`/api/tasks/${projectId}/${taskId}`, { method: 'PATCH', body: { status } }).catch((e: any) => {
+          useToast().add({ color: 'error', title: 'Не удалось обновить статус задачи', description: e?.message })
+        })
+      }
     },
 
     // ── Update task note (staff comment) ─────────────────────────────────────
@@ -482,7 +545,12 @@ export const useCrmStore = defineStore('crm', {
     // ── Update project status ─────────────────────────────────────────────────
     updateProjectStatus(projectId: string, status: CrmProject['status']) {
       const project = this.projects.find(p => p.id === projectId)
-      if (project) project.status = status
+      if (project) {
+        project.status = status
+        $fetch(`/api/projects/${projectId}`, { method: 'PUT', body: { status } }).catch((e: any) => {
+          useToast().add({ color: 'error', title: 'Не удалось обновить статус проекта', description: e?.message })
+        })
+      }
     },
 
     // ── Update project metadata ───────────────────────────────────────────────
@@ -491,7 +559,12 @@ export const useCrmStore = defineStore('crm', {
       'startDate' | 'plannedEndDate' | 'contactPerson' | 'contactPhone' | 'contactEmail'
     >>) {
       const project = this.projects.find(p => p.id === projectId)
-      if (project) Object.assign(project, changes)
+      if (project) {
+        Object.assign(project, changes)
+        $fetch(`/api/projects/${projectId}`, { method: 'PUT', body: changes }).catch((e: any) => {
+          useToast().add({ color: 'error', title: 'Не удалось сохранить изменения проекта', description: e?.message })
+        })
+      }
     },
 
     // ── Add task to existing project ──────────────────────────────────────────
@@ -508,6 +581,9 @@ export const useCrmStore = defineStore('crm', {
         paymentSplits: [], status: 'todo', deadline: data.deadline,
       }
       project.tasks.push(task)
+      $fetch(`/api/tasks/${projectId}`, { method: 'POST', body: { tasks: [task] } }).catch((e: any) => {
+        useToast().add({ color: 'error', title: 'Не удалось добавить задачу', description: e?.message })
+      })
       return taskId
     },
 
@@ -567,7 +643,7 @@ export const useCrmStore = defineStore('crm', {
       const requestId = `cr-${Date.now()}`
       const request: ChangeRequest = {
         id: requestId, projectId, taskId, type, proposedBy: proposerStaffId,
-        proposedAt: new Date().toISOString().split('T')[0],
+        proposedAt: dayjs().format('YYYY-MM-DD'),
         reason, changes, approvals, status: 'pending',
       }
 
@@ -584,7 +660,7 @@ export const useCrmStore = defineStore('crm', {
       if (!approval || approval.status !== 'pending') return
 
       approval.status = 'approved'
-      approval.date = new Date().toISOString().split('T')[0]
+      approval.date = dayjs().format('YYYY-MM-DD')
       if (comment) approval.comment = comment
 
       // Check if all approvals are done
@@ -603,7 +679,7 @@ export const useCrmStore = defineStore('crm', {
       if (!approval) return
 
       approval.status = 'rejected'
-      approval.date = new Date().toISOString().split('T')[0]
+      approval.date = dayjs().format('YYYY-MM-DD')
       if (comment) approval.comment = comment
 
       req.status = 'rejected'
@@ -639,5 +715,7 @@ export const useCrmStore = defineStore('crm', {
     },
   },
 
-  persist: true,
+  persist: {
+    pick: ['selectedProjectId'],
+  },
 })
