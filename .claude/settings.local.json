@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(timeout 15 npm run dev)",
+      "Bash(npm install:*)",
+      "Bash(node -e \":*)",
+      "Bash(\"D:/utkirov/work/2026/AI/crm-turon/node_modules/@rollup/rollup-win32-x64-msvc/index.js\":*)",
+      "Bash(node -e \"const m = require\\(''D:/utkirov/work/2026/AI/crm-turon/node_modules/@rollup/rollup-win32-x64-msvc''\\); console.log\\(Object.keys\\(m\\)\\)\")",
+      "Bash(node -e \"const m = require\\(''D:/utkirov/work/2026/AI/crm-turon/node_modules/rollup/dist/native.js''\\); console.log\\(Object.keys\\(m\\)\\)\")",
+      "Bash(curl -s http://localhost:3000)",
+      "Bash(curl -s http://localhost:3000/)",
+      "Bash(node_modules/.bin/nuxt build:*)",
+      "Bash(node -e \"console.log\\(require\\(''./node_modules/pinia/package.json''\\).version\\)\")",
+      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\(''./node_modules/@pinia/nuxt/package.json''\\).peerDependencies\\)\\)\")",
+      "Bash(grep \"^pinia$\")",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(npx kill-port:*)",
+      "Bash(curl -s http://localhost:3000/login)",
+      "Bash(npx nuxi:*)"
+    ]
+  }
+}
